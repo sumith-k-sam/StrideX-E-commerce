@@ -8,7 +8,7 @@ pipeline {
         DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds' 
         
         // Git configuration for pushing manifest updates
-        GIT_CREDENTIALS_ID       = 'github-pat' // ⚠️ Add this in Jenkins Credentials (Username/Password or SSH)
+        GIT_CREDENTIALS_ID       = 'github-pat' 
 
         // Build identifiers (Using BUILD_NUMBER ensures immutable, traceable tags like 1, 2, 3...)
         IMAGE_TAG                = "${BUILD_NUMBER}"
@@ -131,7 +131,7 @@ pipeline {
         }
 
         // ==========================================
-        // NEW: CD / GitOps Stage for ArgoCD
+        // CD / GitOps Stage for ArgoCD
         // ==========================================
         stage('Update K8s Manifests & Trigger ArgoCD') {
             steps {
@@ -164,16 +164,15 @@ pipeline {
                             # Commit with [skip ci] to prevent Jenkins from triggering an infinite loop on this commit!
                             git commit -m "chore(k8s): update image tag to ${IMAGE_TAG} [skip ci]" || echo "No changes to commit"
 
-                            # Push back to the repository (assuming 'origin' and current branch, usually 'main' or 'master')
-                            # We inject credentials into the remote URL securely for the push
-                            git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/ridhindas/strideX.git
+                            # Push back to the CORRECT repository (sumith-k-sam/StrideX-E-commerce)
+                            git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/sumith-k-sam/StrideX-E-commerce.git
                             git push origin HEAD:main
                             
                             # Reset remote URL to remove credentials from local config for security
-                            git remote set-url origin https://github.com/ridhindas/strideX.git
+                            git remote set-url origin https://github.com/sumith-k-sam/StrideX-E-commerce.git
                         '''
                     }
-                    echo "✅ ArgoCD will now detect the commit and deploy version ${IMAGE_TAG} automatically."
+                    echo "✅ ArgoCD will now detect the commit in sumith-k-sam/StrideX-E-commerce and deploy version ${IMAGE_TAG} automatically."
                 }
             }
         }
