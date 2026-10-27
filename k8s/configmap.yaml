@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stridex-config
+  labels:
+    app: stridex
+data:
+  NODE_ENV: "production"
+  NEXTAUTH_URL: "https://your-domain.com" # Replace with your actual domain
+  # Add any other non-sensitive env vars here

@@ -2,12 +2,15 @@ pipeline {
     agent any
 
     environment {
-        // Docker Hub configuration - Replace with your Docker Hub username/org
+        // Docker Hub configuration
         DOCKERHUB_USERNAME       = 'sumithksam'
         DOCKER_IMAGE_NAME        = "${DOCKERHUB_USERNAME}/stridex-ecommerce"
-        DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds' // ID configured in Jenkins Credentials Store
+        DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds' 
+        
+        // Git configuration for pushing manifest updates
+        GIT_CREDENTIALS_ID       = 'github-pat' // ⚠️ Add this in Jenkins Credentials (Username/Password or SSH)
 
-        // Build identifiers
+        // Build identifiers (Using BUILD_NUMBER ensures immutable, traceable tags like 1, 2, 3...)
         IMAGE_TAG                = "${BUILD_NUMBER}"
         REPORTS_DIR              = "${WORKSPACE}/reports"
     }
@@ -35,9 +38,7 @@ pipeline {
         stage('Dependency Installation') {
             steps {
                 echo "Installing project dependencies..."
-                sh '''
-                    npm ci --prefer-offline || npm install
-                '''
+                sh 'npm ci --prefer-offline || npm install'
             }
         }
 
@@ -45,14 +46,10 @@ pipeline {
             steps {
                 echo "Running npm audit (Software Composition Analysis)..."
                 sh '''
-                    # Run npm audit without failing the pipeline (|| true)
                     npm audit --json > "${REPORTS_DIR}/npm-audit.json" || true
                     npm audit > "${REPORTS_DIR}/npm-audit.txt" || true
-                    
-                    # Generate an HTML report for friendly viewing
                     npx --yes npm-audit-html --output "${REPORTS_DIR}/npm-audit.html" || true
-                    
-                    echo "npm audit completed. Artifacts stored in ${REPORTS_DIR}/"
+                    echo "npm audit completed."
                 '''
             }
         }
@@ -61,16 +58,12 @@ pipeline {
             steps {
                 echo "Running Semgrep SAST scan..."
                 sh '''
-                    # Execute Semgrep using official container; does not fail pipeline if findings exist
-                    docker run --rm \
-                        -v "${WORKSPACE}:/src" \
-                        semgrep/semgrep semgrep scan \
+                    docker run --rm -v "${WORKSPACE}:/src" semgrep/semgrep semgrep scan \
                         --config auto \
                         --json -o /src/reports/semgrep.json \
                         --sarif -o /src/reports/semgrep.sarif \
                         --text -o /src/reports/semgrep.txt || true
-
-                    echo "Semgrep scan completed. Artifacts stored in ${REPORTS_DIR}/"
+                    echo "Semgrep scan completed."
                 '''
             }
         }
@@ -89,16 +82,9 @@ pipeline {
                 script {
                     echo "Starting application container and executing OWASP ZAP Baseline Scan..."
                     sh '''
-                        # Create dedicated bridge network
                         docker network create zap-net || true
+                        docker run -d --name zap-app-target --network zap-net -e PORT=3000 ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
 
-                        # Run the newly built container in the network
-                        docker run -d --name zap-app-target \
-                            --network zap-net \
-                            -e PORT=3000 \
-                            ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
-
-                        # Wait for the application to be ready
                         echo "Waiting for Next.js app to be reachable on port 3000..."
                         for i in $(seq 1 30); do
                             if docker run --rm --network zap-net curlimages/curl:latest -s http://zap-app-target:3000 > /dev/null 2>&1; then
@@ -109,31 +95,16 @@ pipeline {
                             sleep 2
                         done
 
-                        # Ensure write permissions for ZAP container (uid 1000)
                         chmod -R 777 "${REPORTS_DIR}"
-
-                        # Run OWASP ZAP Baseline Scan
-                        # -I tells ZAP not to return failure code on warnings
-                        # || true ensures vulnerability findings never break the pipeline
-                        docker run --rm \
-                            --network zap-net \
-                            -v "${REPORTS_DIR}:/zap/wrk/:rw" \
-                            -t ghcr.io/zaproxy/zaproxy:stable \
-                            zap-baseline.py \
-                            -t http://zap-app-target:3000 \
-                            -r zap-report.html \
-                            -J zap-report.json \
-                            -w zap-report.md \
-                            -I || true
-
-                        echo "OWASP ZAP scan completed. Reports stored in ${REPORTS_DIR}/"
+                        docker run --rm --network zap-net -v "${REPORTS_DIR}:/zap/wrk/:rw" -t ghcr.io/zaproxy/zaproxy:stable \
+                            zap-baseline.py -t http://zap-app-target:3000 -r zap-report.html -J zap-report.json -w zap-report.md -I || true
+                        echo "OWASP ZAP scan completed."
                     '''
                 }
             }
             post {
                 always {
                     sh '''
-                        echo "Cleaning up OWASP ZAP target container and network..."
                         docker rm -f zap-app-target || true
                         docker network rm zap-net || true
                     '''
@@ -158,6 +129,54 @@ pipeline {
                 }
             }
         }
+
+        // ==========================================
+        // NEW: CD / GitOps Stage for ArgoCD
+        // ==========================================
+        stage('Update K8s Manifests & Trigger ArgoCD') {
+            steps {
+                echo "Updating k8s/deployment.yaml with new image tag: ${IMAGE_TAG}..."
+                script {
+                    // 1. Update the image tag in the deployment file using sed
+                    sh '''
+                        # Replace the entire image line with the new specific build number tag
+                        sed -i "s|image: .*|image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        
+                        # Verify the change was made
+                        echo "Updated deployment.yaml image to:"
+                        grep "image:" k8s/deployment.yaml
+                    '''
+
+                    // 2. Commit and push back to Git to trigger ArgoCD
+                    withCredentials([usernamePassword(
+                        credentialsId: env.GIT_CREDENTIALS_ID,
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_PASS'
+                    )]) {
+                        sh '''
+                            # Configure Git user for the commit
+                            git config user.email "jenkins-ci@stridex.local"
+                            git config user.name "Jenkins CI Bot"
+
+                            # Stage the changed file
+                            git add k8s/deployment.yaml
+
+                            # Commit with [skip ci] to prevent Jenkins from triggering an infinite loop on this commit!
+                            git commit -m "chore(k8s): update image tag to ${IMAGE_TAG} [skip ci]" || echo "No changes to commit"
+
+                            # Push back to the repository (assuming 'origin' and current branch, usually 'main' or 'master')
+                            # We inject credentials into the remote URL securely for the push
+                            git remote set-url origin https://${GIT_USER}:${GIT_PASS}@github.com/ridhindas/strideX.git
+                            git push origin HEAD:main
+                            
+                            # Reset remote URL to remove credentials from local config for security
+                            git remote set-url origin https://github.com/ridhindas/strideX.git
+                        '''
+                    }
+                    echo "✅ ArgoCD will now detect the commit and deploy version ${IMAGE_TAG} automatically."
+                }
+            }
+        }
     }
 
     post {
@@ -166,7 +185,6 @@ pipeline {
                 echo "Archiving scan reports..."
                 archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
-                // If HTML Publisher plugin is installed, publish interactive report
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                     publishHTML(target: [
                         allowMissing: true,
@@ -180,10 +198,10 @@ pipeline {
             }
         }
         success {
-            echo "CI Pipeline finished successfully! Latest image is ready on Docker Hub for CD."
+            echo "🎉 CI/CD Pipeline finished successfully! Image ${DOCKER_IMAGE_NAME}:${IMAGE_TAG} is deployed via ArgoCD."
         }
         failure {
-            echo "Pipeline failed during build, packaging, or credential operations."
+            echo "❌ Pipeline failed. Check console output for details."
         }
     }
 }

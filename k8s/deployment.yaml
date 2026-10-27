@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stridex-app
+  labels:
+    app: stridex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stridex
+  template:
+    metadata:
+      labels:
+        app: stridex
+    spec:
+      containers:
+        - name: stridex
+          # Jenkins will update this tag automatically
+          image: ridhindas/stridex-ecommerce:latest 
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: stridex-config
+            - secretRef:
+                name: stridex-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
