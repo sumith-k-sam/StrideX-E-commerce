@@ -17,7 +17,7 @@ spec:
       containers:
         - name: stridex
           # Jenkins will update this tag automatically
-          image: sumithksam/stridex-ecommerce:latest 
+          image: sumithksam/stridex-ecommerce:4
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
